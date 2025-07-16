@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -e
+
+if [[ "$1" != "init" ]]; then
+  echo "❌ Comando no reconocido. Usa: proyect-go init"
+  exit 1
+fi
+
+read -rp "📛 Nombre del proyecto: " name
+
+mkdir "$name"
+cd "$name"
+
+echo "🧩 Inicializando módulo Go..."
+go mod init "$name"
+
+echo "📦 Instalando dependencias..."
+go get github.com/gofiber/fiber/v2 \
+       golang.org/x/crypto/bcrypt \
+       github.com/golang-jwt/jwt/v5 \
+       github.com/joho/godotenv \
+       go get github.com/lib/pq
+
+echo "📂 Estructura..."
+mkdir -p routes controllers models middlewares config
+
+echo "📄 Archivos..."
+cat <<EOF > .gitignore
+.env
+bin/
+*.exe
+EOF
+
+cat <<EOF > .env
+PORT=8080
+DB_URL="[pon aqui tu url]"
+JWT_SECRET=[pon aqui tu palabra secreta de JWT]
+EOF
+
+cat <<EOF > config/db.go
+package db
+
+
+import (
+	"context"
+	"database/sql"
+	"log"
+	"os"
+	"time"
+
+	_ "github.com/lib/pq"
+)
+
+func Connect() *sql.DB {
+	dsn := os.Getenv("DB_URL")
+	if dsn == "" {
+		log.Fatal("Falta la variable DB_URL")
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		log.Fatalf("sql.Open: %v", err)
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(3)
+	db.SetConnMaxLifetime(time.Hour)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err = db.PingContext(ctx); err != nil {
+		log.Fatalf("Ping DB: %v", err)
+	}
+
+	log.Println("Conectado a PostgreSQL (lib/pq)")
+	return db
+}
+
+EOF
+
+cat <<EOF > main.go
+package main
+
+import (
+	"log"
+	"os"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/joho/godotenv"
+
+	db "back/config"
+)
+
+func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println(".env no encontrado, usando vars del sistema")
+	}
+
+	sqlDB := db.Connect()
+	defer sqlDB.Close()
+
+	app := fiber.New()
+	app.Get("/ping", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("corriendo en http://localhost:%s", port)
+	log.Fatal(app.Listen(":" + port))
+}
+
+EOF
+
+echo "Generando configuaracion de Air"
+
+air init > /dev/null
+
+echo "✅ Proyecto '$name' creado exitosamente 🚀"
