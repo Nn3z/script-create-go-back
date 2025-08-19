@@ -23,7 +23,7 @@ Sigue estos pasos para instalar y ejecutar **proyect-go**:
 2. **Mueve el script a /usr/local/bin para poder usarlo globalmente:**  
     ```bash
     sudo mv backend-go /usr/local/bin/
-    sudo chmod +x /usr/local/bin/proyect-go
+    sudo chmod +x /usr/local/bin/backend-go
     ```
 
 3. **Actualizar el script cuando haya cambios**
