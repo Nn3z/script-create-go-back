@@ -299,6 +299,7 @@ include_dir = ["cmd/server", "internal", "pkg"]
   keep_scroll = true
 EOF
 
+
 echo "✅ Proyecto '$name' creado exitosamente 🚀"
 
 echo "💡 Ejecuta: cd $name"
