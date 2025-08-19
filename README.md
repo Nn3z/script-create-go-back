@@ -35,7 +35,23 @@ Sigue estos pasos para instalar y ejecutar **proyect-go**:
     sudo cp backend-go /usr/local/bin/
     sudo chmod +x /usr/local/bin/backend-go
     ```
-
+## USO DEL SCRIPT
+Inicia el script
+```bash
+backend-go init
+```
+Entra a la carpeta del proyecto generado
+```bash
+cd NOMBRE_DE_LA_CARPETA
+```
+Instalar las dependencias de Go y asegurarse de que go.sum esté completo:
+```bash
+go mod tidy
+```
+Ejecutar el proyecto con Air:
+```bash
+air
+```
 
 
 # GRACIAS EL APOYO
