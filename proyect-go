@@ -6,6 +6,15 @@ if [[ "$1" != "init" ]]; then
   exit 1
 fi
 
+# Verificar si Go está instalado
+if ! command -v go &> /dev/null; then
+    echo "❌ Go no está instalado. Por favor instálalo: https://go.dev/dl/"
+else
+    echo "✅ Go ya está instalado"
+fi
+
+echo "HOLA! $USER, este es un script para comenzar un proyecto bakend con go + fiber v2 + soporte de postgresql"
+
 read -rp "📛 Nombre del proyecto: " name
 
 mkdir "$name"
@@ -15,106 +24,287 @@ echo "🧩 Inicializando módulo Go..."
 go mod init "$name"
 
 echo "📦 Instalando dependencias..."
-go get github.com/gofiber/fiber/v2 \
-       golang.org/x/crypto/bcrypt \
-       github.com/golang-jwt/jwt/v5 \
-       github.com/joho/godotenv \
-       go get github.com/lib/pq
+go get github.com/gofiber/fiber/v2
+go get golang.org/x/crypto/bcrypt
+go get github.com/golang-jwt/jwt/v5
+go get github.com/joho/godotenv
+go get github.com/lib/pq
 
 echo "📂 Estructura..."
-mkdir -p routes controllers models middlewares config
+mkdir -p internal \
+ 		 pkg/{config,middleware,utils} \
+		 cmd/server
 
 echo "📄 Archivos..."
 cat <<EOF > .gitignore
-.env
-bin/
-*.exe
+/.env
+
+/tmp
+
+/.air.toml
 EOF
 
-cat <<EOF > .env
+cat <<EOF > pkg/utils/sqlparse.go
+package utils
+//el sqlparse solo se ocupa para generar consultas sql de tipo insert y update
+import (
+	"fmt"
+	"strings"
+	"strconv"
+)
+
+// ParseInsertArray genera dinámicamente una consulta SQL de tipo INSERT
+func ParseInsertArray(tableName string, data map[string]interface{}) (string, []interface{}) {
+	columns := []string{}
+	placeholders := []string{}
+	values := []interface{}{}
+
+	i := 1
+	for key, value := range data {
+		columns = append(columns, key)                             // Agrega el nombre de la columna
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i)) // Genera los placeholders ($1, $2, ...)
+		values = append(values, value)                             // Agrega el valor correspondiente
+		i++
+	}
+
+	// Genera la consulta SQL
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableName, strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+	return query, values
+
+	/*ejemplo de uso:
+			data := map[string]interface{}{
+			"name":  user.Name,
+			"email": "john@example.com",
+			"age":   25,
+	}
+
+	query, values := utils.ParseInsertArray("users", data)
+	fmt.Println(query)  // INSERT INTO users (name, email, age) VALUES ($1, $2, $3)
+	fmt.Println(values) // [John john@example.com 25]
+	*/
+
+}
+//Genera dinámicamente una consulta SQL de tipo UPDATE
+// ParseUpdateArray genera una consulta SQL de actualización y una lista de valores
+func ParseUpdateArray(table string, data map[string]interface{}, condition map[string]interface{}) (string, []interface{}) {
+	setClauses := []string{}
+	values := []interface{}{}
+	i := 1
+
+	// Construir las cláusulas SET
+	for key, value := range data {
+			if value != nil && value != "" { // Filtrar valores vacíos o nulos
+					setClauses = append(setClauses, key+" = $"+strconv.Itoa(i))
+					values = append(values, value)
+					i++
+			}
+	}
+
+	// Construir las condiciones WHERE
+	whereClauses := []string{}
+	for key, value := range condition {
+			whereClauses = append(whereClauses, key+" = $"+strconv.Itoa(i))
+			values = append(values, value)
+			i++
+	}
+
+	// Generar la consulta SQL
+	query := "UPDATE " + table + " SET " + strings.Join(setClauses, ", ") + " WHERE " + strings.Join(whereClauses, " AND ")
+	return query, values
+}
+	/* Ejemplo de uso:
+			data := map[string]interface{}{
+    "name": "John Doe",
+    "age":  26,
+}
+condition := map[string]interface{}{
+    "id": 1,
+}
+query, values := utils.ParseUpdateArray("users", data, condition)
+fmt.Println(query)  // UPDATE users SET name = $1, age = $2 WHERE id = $3
+fmt.Println(values) // [John Doe 26 1]
+
+	*/
+
+
+EOF
+
+read -rp "💡 ¿Quieres ingresar la url de tu base de datos y palabra secreta JWT ahora? (y/n): " auto_env
+
+if [[ "$auto_env" == "y" || "$auto_env" == "Y" ]]; then
+    read -rp "📦 URL de la base de datos: " db_url
+    read -rp "🔑 JWT Secret: " jwt_secret
+
+    cat <<EOF > .env
+PORT=8080
+DB_URL="$db_url"
+JWT_SECRET="$jwt_secret"
+EOF
+else
+    cat <<EOF > .env
 PORT=8080
 DB_URL="[pon aqui tu url]"
 JWT_SECRET=[pon aqui tu palabra secreta de JWT]
 EOF
+fi
 
-cat <<EOF > config/db.go
-package db
 
+
+cat <<EOF > pkg/config/db.go
+package config
 
 import (
-	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
-	"time"
+
+	"github.com/joho/godotenv"
 
 	_ "github.com/lib/pq"
 )
 
-func Connect() *sql.DB {
-	dsn := os.Getenv("DB_URL")
-	if dsn == "" {
-		log.Fatal("Falta la variable DB_URL")
-	}
+var db *sql.DB
 
-	db, err := sql.Open("postgres", dsn)
+func ConnectDB() {
+	err := godotenv.Load()
 	if err != nil {
-		log.Fatalf("sql.Open: %v", err)
-	}
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(3)
-	db.SetConnMaxLifetime(time.Hour)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err = db.PingContext(ctx); err != nil {
-		log.Fatalf("Ping DB: %v", err)
+		log.Fatal("Error loading .env file")
 	}
 
-	log.Println("Conectado a PostgreSQL (lib/pq)")
+	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		log.Fatal("DATABASE_URL is not set in .env file")
+	}
+
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal("Failed to open database connection:", err)
+	}
+
+	err = db.Ping()
+	if err != nil {
+		log.Fatal("Failed to ping database:", err)
+	}
+
+	fmt.Println("Connected to the database successfully!")
+}
+
+func GetDB() *sql.DB {
+	if db == nil {
+		log.Fatal("Database connection is not established")
+	}
 	return db
 }
 
 EOF
-
-cat <<EOF > main.go
+# main.go muy importante
+cat <<EOF > cmd/server/main.go
 package main
 
 import (
+	"$name/pkg/config"
 	"log"
 	"os"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/joho/godotenv"
-
-	db "back/config"
+	_ "github.com/lib/pq"
 )
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Println(".env no encontrado, usando vars del sistema")
-	}
-
-	sqlDB := db.Connect()
-	defer sqlDB.Close()
-
+	config.ConnectDB()
 	app := fiber.New()
-	app.Get("/ping", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok"})
-	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	log.Printf("corriendo en http://localhost:%s", port)
-	log.Fatal(app.Listen(":" + port))
+
+
+	log.Fatal(app.Listen(":" + os.Getenv("PORT")))
 }
 
 EOF
 
+
+
 echo "Generando configuaracion de Air"
+# Esta condicional verifica si el usuario tiene air instalado, sino lo instala
+if ! command -v air &> /dev/null
+then
+    echo "❌ Air no está instalado."
+    read -rp "¿Quieres instalar Air ahora? (y/n): " choice
+    if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
+        echo "🔧 Instalando Air..."
+        go install github.com/air-verse/air@latest
+        echo "✅ Air instalado"
+    else
+        echo "⚠️ Air no se instalará. Continuando sin hot reload."
+    fi
+else
+    echo "✅ Air ya está instalado"
+fi
+
 
 air init > /dev/null
+cat <<EOF > .air.toml
+root = "."
+testdata_dir = "testdata"
+tmp_dir = "tmp"
+
+
+[build]
+  args_bin = []
+  bin = "./tmp/main"
+  cmd = "go build -o ./tmp/main ./cmd/server"
+  delay = 1000
+  exclude_dir = ["assets", "tmp", "vendor", "testdata"]
+  exclude_file = []
+  exclude_regex = ["_test.go"]
+  exclude_unchanged = false
+  follow_symlink = false
+  full_bin = ""
+include_dir = ["cmd/server", "internal", "pkg"]
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  include_file = []
+  kill_delay = "0s"
+  log = "build-errors.log"
+  poll = false
+  poll_interval = 0
+  post_cmd = []
+  pre_cmd = []
+  rerun = false
+  rerun_delay = 500
+  send_interrupt = false
+  stop_on_error = false
+
+[color]
+  app = ""
+  build = "yellow"
+  main = "magenta"
+  runner = "green"
+  watcher = "cyan"
+
+[log]
+  main_only = false
+  silent = false
+  time = false
+
+[misc]
+  clean_on_exit = false
+
+[proxy]
+  app_port = 0
+  enabled = false
+  proxy_port = 0
+
+[screen]
+  clear_on_rebuild = false
+  keep_scroll = true
+EOF
 
 echo "✅ Proyecto '$name' creado exitosamente 🚀"
+
+echo "💡 Ejecuta: cd $name"
+
+echo "go mod tidy"
+
+echo "GRACIAS POR USAR ESTE SCRIPT "
+
+echo "💖 Puedes apoyarme en: https://github.com/Nn3z"
