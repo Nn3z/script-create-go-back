@@ -2,7 +2,7 @@
 set -e
 
 if [[ "$1" != "init" ]]; then
-  echo "❌ Comando no reconocido. Usa: proyect-go init"
+  echo "❌ Comando no reconocido. Usa: backend-go init"
   exit 1
 fi
 
