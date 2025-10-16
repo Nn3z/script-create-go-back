@@ -102,7 +102,7 @@ echo "📂 Estructura..."
 # EN pkg VAN COSAS QUE PUEDEN SER REUSADAS (UTILIDADES, CONFIGURACIONES, MIDDLEWARES)
 # EN cmd VA EL PUNTO DE ENTRADA
 # EN db VA LO RELACIONADO A LA BASE DE DATOS (ESQUEMA, MIGRACIONES, ETC)
-mkdir -p internal \
+mkdir -p internal/users/{routes, controller, repository, service, DTOs, model} \
      pkg/{config,middleware,utils} \
      cmd/server \
      db
