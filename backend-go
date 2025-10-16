@@ -1,230 +1,429 @@
 #!/usr/bin/env bash
-set -e
+# === CONFIGURACIÓN Y TRAMPAS DE ERROR ===
+set -euo pipefail # manejo de errores: -e (salir inmediatamente), -u (variables no definidas), -o pipefail (fallar en pipelines)
+
+# ESTA ES LA VARIABLE GLOBAL DEL NOMBRE DEL PROYECTO :3
+PROJECT_NAME=""
+
+# ESTA ES LA FUNCION DE LIMPIEZA :)))))
+cleanup() {
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ] && [ -n "$PROJECT_NAME" ] && [ -d "$PROJECT_NAME" ]; then
+        echo ""
+        echo "=========================================================="
+        echo "💥 ERROR detectado (código $exit_code). Limpiando..."
+        cd ..
+        # EN ESTA PARTE SOLO ELIMINO SI EL DIRECTORIO FUE CREADO POR ESTE SCRIPT
+        rm -rf "$PROJECT_NAME"
+        echo "❌ Directorio '$PROJECT_NAME' eliminado para un intento limpio."
+        echo "=========================================================="
+    elif [ "$exit_code" -eq 0 ]; then
+        # MENSAJE SI TODO SALE GOD
+        echo ""
+        echo "=========================================================="
+        echo "Proyecto '$PROJECT_NAME' creado exitosamente. ¡Listo para arrancar!"
+        echo "Pasos a seguir:"
+        echo "1. cd $PROJECT_NAME"
+        echo "2. docker compose up --build"
+        echo "3. Ejecuta 'air' en otra terminal para hot-reload (si lo instalaste)."
+        echo "=========================================================="
+    fi
+    exit $exit_code
+}
+
+# EJECUTA LA FUNCION cleanup AL SALIR, SEA POR ERROR O NONESSSSS
+trap cleanup EXIT
+
+# ==================================
+# 1. VALIDACIÓN INICIAL
+# ==================================
+
+echo "=========================================================="
+echo "Backend Go Inicializador: Fiber + PostgreSQL + Docker"
+echo "=========================================================="
 
 if [[ "$1" != "init" ]]; then
-  echo "❌ Comando no reconocido. Usa: backend-go init"
+  echo "Comando no reconocido. Usa: $0 init"
   exit 1
 fi
-
+# ESTA PARTE VERIFICA SI GO ESTA INSTALADO :O
 if ! command -v go &> /dev/null; then
-    echo "❌ Go no está instalado. Por favor instálalo: https://go.dev/dl/"
-else
-    echo "✅ Go ya está instalado"
+    echo "Go no está instalado. Por favor instálalo: https://go.dev/dl/"
+    exit 1 # SALE EL ERROR >C
 fi
+echo "Go ya está instalado"
 
-echo "HOLA! $USER, este es un script para comenzar un proyecto bakend con go + fiber v2 + soporte de postgresql"
+# ==================================
+# 2. CONFIGURACIÓN DEL PROYECTO
+# ==================================
 
-read -rp "📛 Nombre del proyecto: " name
+# VARIABLES QUE SE USARAN EN LA CONFIGURACION DEL PROYECTO
+DB_USER="devuser"
+DB_PASS="devpassword"
+DB_NAME="myappdb"
+APP_PORT="8080"
+JWT_SECRET_DEFAULT="supersecretkey"
 
-mkdir "$name"
-cd "$name"
-
-echo "🧩 Inicializando módulo Go..."
-go mod init "$name"
-
+# VALIDA EL NOMBRE HASTA QUE ESTE ESTE CORRECTO
+while true; do
+    read -rp "Nombre del proyecto (solo letras, números y guiones): " name_input
+    
+    if [[ "$name_input" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        PROJECT_NAME="$name_input"
+        break
+    else
+        echo "Nombre inválido. Usa solo letras, números, guiones o guiones bajos."
+    fi
+done
+# VALIDA QUE NO EXISTA YA UN DIRECTORIO CON ESE NOMBRE
+if [ -d "$PROJECT_NAME" ]; then
+    echo "El directorio '$PROJECT_NAME' ya existe. Cancela para evitar sobrescribir."
+    exit 1
+fi
+# CREA EL DIRECTORIO Y SE MUEVE A EL
+mkdir "$PROJECT_NAME"
+cd "$PROJECT_NAME"
+# INICIALIZA EL MODULO GO
+echo "🧩 Inicializando módulo Go ($PROJECT_NAME)..."
+go mod init "$PROJECT_NAME"
+# INSTALA LAS DEPENDENCIAS NECESARIAS
 echo "📦 Instalando dependencias..."
 go get github.com/gofiber/fiber/v2
 go get golang.org/x/crypto/bcrypt
 go get github.com/golang-jwt/jwt/v5
 go get github.com/joho/godotenv
 go get github.com/lib/pq
+go mod tidy > /dev/null # LIMPIA EL GO.MOD Y GO.SUM PARA QUE NO TENGA COSAS RARAS
 
 echo "📂 Estructura..."
+# LA OPCION -p CREA DIRECTORIOS PADRE SI NO EXISTEN
+# ESTA ES LA ESTRUCTURA QUE YO RECOMIENDO YA QUE ES MODULAR Y FACIL DE ENTENDER
+# EN internal VAN COSAS QUE NO QUIERES QUE OTROS USEN (LOGICA DE NEGOCIO)
+# EN pkg VAN COSAS QUE PUEDEN SER REUSADAS (UTILIDADES, CONFIGURACIONES, MIDDLEWARES)
+# EN cmd VA EL PUNTO DE ENTRADA
+# EN db VA LO RELACIONADO A LA BASE DE DATOS (ESQUEMA, MIGRACIONES, ETC)
 mkdir -p internal \
- 		 pkg/{config,middleware,utils} \
-		 cmd/server
-
-echo "📄 Archivos..."
+     pkg/{config,middleware,utils} \
+     cmd/server \
+     db
+# CREA EL ARCHIVO .gitignore 
+echo "📄 Archivos base..."
 cat <<EOF > .gitignore
-/.env
-
+# Dependencias
+/vendor
+# Binarios
+/*.exe
+/*.bin
 /tmp
-
+# Archivos de entorno
+/.env
+# Archivos de Air
 /.air.toml
+# Data de la BD
+/db/data
 EOF
 
+# CREA EL ARCHIVO DE ESQUEMA DE LA BASE DE DATOS (POSTGRESQL)
+# EN ESTE VIENE UNA TABLA DE USUARIOS DE EJEMPLO :3
+# LA CUAL PUEDES CAMBIAR EL ARCHIVO ANTES DE LEVANTAR EL CONTENEDOR PARA ASI PODER TENER TU PROPIA ESTRUCTURA
+cat <<EOF > db/schema.sql
+-- Archivo de esquema inicial de la base de datos
+-- Se ejecuta una sola vez al levantar el contenedor de PostgreSQL
+
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+EOF
+
+# ==================================
+# 3. GENERACIÓN DE CÓDIGO Y DOCKER
+# ==================================
+
+# MANEJOR DE EL .env
+echo "📄 Configurando .env..."
+# PREGUNTA SI QUIERE CONFIGURAR EL .ENV AHORA CON VALORES PERSONALIZADOS O DEJA LOS POR DEFECTO
+read -rp "💡 ¿Quieres ingresar tu URL de BD y palabra secreta JWT ahora? (y/n): " auto_env
+# CREA LOS VALORES POR DEFECTO POR SI EL USUARIO NO QUIERE PERSONALIZAR
+db_url_final="postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}?sslmode=disable"
+jwt_secret_final="$JWT_SECRET_DEFAULT"
+# SI EL USUARIO QUIERE PERSONALIZAR, PREGUNTA Y ACTUALIZA LAS VARIABLES
+if [[ "$auto_env" == "y" || "$auto_env" == "Y" ]]; then
+    read -rp "📦 URL de la base de datos (Ej: $db_url_final): " custom_db_url
+    # SOLO SI EL USUARIO INGRESA ALGO, ACTUALIZA LA VARIABLE
+    [ -n "$custom_db_url" ] && db_url_final="$custom_db_url"
+
+    read -rp "🔑 JWT Secret (Ej: $JWT_SECRET_DEFAULT): " custom_jwt_secret
+    [ -n "$custom_jwt_secret" ] && jwt_secret_final="$custom_jwt_secret"
+fi
+# CREA EL ARCHIVO .env CON LAS VARIABLES NECESARIAS
+cat <<EOF > .env
+# Variables de la aplicación
+PORT=${APP_PORT}
+JWT_SECRET=${jwt_secret_final}
+
+# Variables de la base de datos
+DB_URL=${db_url_final}
+DB_USER=${DB_USER}
+DB_PASS=${DB_PASS}
+DB_NAME=${DB_NAME}
+EOF
+
+
+# UFF DOCKER :O
+echo "📄 Archivo Dockerfile..."
+cat <<EOF > Dockerfile
+# Etapa 1: Build Stage
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Construye la aplicación. Asegúrate de que el path coincida con tu estructura (./cmd/server)
+RUN CGO_ENABLED=0 go build -o /server ./cmd/server
+
+# Etapa 2: Runtime Stage
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+
+COPY --from=builder /server /server
+
+# Expone el puerto por defecto de Fiber
+EXPOSE 8080
+
+# Comando para ejecutar la aplicación
+CMD ["/server"]
+EOF
+
+# UFF DOCKER X2 :O
+echo "📄 Archivo docker-compose.yml..."
+cat <<EOF > docker-compose.yml
+services:
+  # --- Servicio de la Base de Datos (PostgreSQL) ---
+  db:
+    image: postgres:16-alpine # Usar una imagen Alpine más ligera y versión más reciente
+    container_name: ${PROJECT_NAME}_db
+    restart: always
+    environment:
+      # Lee las credenciales del .env para no hardcodearlas
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  # --- Servicio de la Aplicación Go (Backend) ---
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ${PROJECT_NAME}_backend
+    restart: unless-stopped
+    env_file:
+      - .env # Carga el .env local
+    ports:
+      - "${APP_PORT}:${APP_PORT}"
+    depends_on:
+      - db
+    # **Importante:** Usar el nombre del servicio (db) como host
+    environment:
+      DB_URL: postgresql://${DB_USER}:${DB_PASS}@db:5432/${DB_NAME}?sslmode=disable
+      # Necesitas redefinir las vars para que Fiber las use, aunque ya estén en .env
+      PORT: ${APP_PORT}
+      # JWT_SECRET: ${jwt_secret_final} # Si es necesario para pruebas
+EOF
+
+# ==================================
+# 4. ARCHIVOS DE CÓDIGO GO
+# ==================================
+
+# sqlparse ES UNA FORMA DE GENERAR CONSULTAS SQL DINÁMICAMENTE SIN NECESIDAD DE USAR UN ORM
+# OJO NO SE VA A QUEDAR PERO PARA PRINCIPIANTES QUE QUIERAS HACER COSAS RAPIDAS VA BIEN
+# EN UN FUTURO IMPLEMENTARE GORM OOOUUU YEAH!!!!!
+echo "📄 Generando pkg/utils/sqlparse.go..."
 cat <<EOF > pkg/utils/sqlparse.go
 package utils
 //el sqlparse solo se ocupa para generar consultas sql de tipo insert y update
 import (
-	"fmt"
-	"strings"
-	"strconv"
+  "fmt"
+  "strings"
+  "strconv"
 )
 
 // ParseInsertArray genera dinámicamente una consulta SQL de tipo INSERT
 func ParseInsertArray(tableName string, data map[string]interface{}) (string, []interface{}) {
-	columns := []string{}
-	placeholders := []string{}
-	values := []interface{}{}
+  columns := []string{}
+  placeholders := []string{}
+  values := []interface{}{}
 
-	i := 1
-	for key, value := range data {
-		columns = append(columns, key)                             // Agrega el nombre de la columna
-		placeholders = append(placeholders, fmt.Sprintf("$%d", i)) // Genera los placeholders ($1, $2, ...)
-		values = append(values, value)                             // Agrega el valor correspondiente
-		i++
-	}
+  i := 1
+  for key, value := range data {
+    columns = append(columns, key)
+    placeholders = append(placeholders, fmt.Sprintf("$%d", i))
+    values = append(values, value)
+    i++
+  }
 
-	// Genera la consulta SQL
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableName, strings.Join(columns, ", "), strings.Join(placeholders, ", "))
-	return query, values
-
-	/*ejemplo de uso:
-			data := map[string]interface{}{
-			"name":  user.Name,
-			"email": "john@example.com",
-			"age":   25,
-	}
-
-	query, values := utils.ParseInsertArray("users", data)
-	fmt.Println(query)  // INSERT INTO users (name, email, age) VALUES ($1, $2, $3)
-	fmt.Println(values) // [John john@example.com 25]
-	*/
-
+  // Genera la consulta SQL
+  query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableName, strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+  return query, values
 }
-//Genera dinámicamente una consulta SQL de tipo UPDATE
+
 // ParseUpdateArray genera una consulta SQL de actualización y una lista de valores
 func ParseUpdateArray(table string, data map[string]interface{}, condition map[string]interface{}) (string, []interface{}) {
-	setClauses := []string{}
-	values := []interface{}{}
-	i := 1
+  setClauses := []string{}
+  values := []interface{}{}
+  i := 1
 
-	// Construir las cláusulas SET
-	for key, value := range data {
-			if value != nil && value != "" { // Filtrar valores vacíos o nulos
-					setClauses = append(setClauses, key+" = $"+strconv.Itoa(i))
-					values = append(values, value)
-					i++
-			}
-	}
+  // Construir las cláusulas SET
+  for key, value := range data {
+      if value != nil && value != "" { // Filtrar valores vacíos o nulos
+          setClauses = append(setClauses, key+" = $"+strconv.Itoa(i))
+          values = append(values, value)
+          i++
+      }
+  }
 
-	// Construir las condiciones WHERE
-	whereClauses := []string{}
-	for key, value := range condition {
-			whereClauses = append(whereClauses, key+" = $"+strconv.Itoa(i))
-			values = append(values, value)
-			i++
-	}
+  // Construir las condiciones WHERE
+  whereClauses := []string{}
+  for key, value := range condition {
+      whereClauses = append(whereClauses, key+" = $"+strconv.Itoa(i))
+      values = append(values, value)
+      i++
+  }
 
-	// Generar la consulta SQL
-	query := "UPDATE " + table + " SET " + strings.Join(setClauses, ", ") + " WHERE " + strings.Join(whereClauses, " AND ")
-	return query, values
+  // Generar la consulta SQL
+  query := "UPDATE " + table + " SET " + strings.Join(setClauses, ", ") + " WHERE " + strings.Join(whereClauses, " AND ")
+  return query, values
 }
-	/* Ejemplo de uso:
-			data := map[string]interface{}{
-    "name": "John Doe",
-    "age":  26,
-}
-condition := map[string]interface{}{
-    "id": 1,
-}
-query, values := utils.ParseUpdateArray("users", data, condition)
-fmt.Println(query)  // UPDATE users SET name = $1, age = $2 WHERE id = $3
-fmt.Println(values) // [John Doe 26 1]
-
-	*/
-
-
 EOF
 
-read -rp "💡 ¿Quieres ingresar la url de tu base de datos y palabra secreta JWT ahora? (y/n): " auto_env
 
-if [[ "$auto_env" == "y" || "$auto_env" == "Y" ]]; then
-    read -rp "📦 URL de la base de datos: " db_url
-    read -rp "🔑 JWT Secret: " jwt_secret
-
-    cat <<EOF > .env
-PORT=8080
-DB_URL="$db_url"
-JWT_SECRET="$jwt_secret"
-EOF
-else
-    cat <<EOF > .env
-PORT=8080
-DB_URL="[pon aqui tu url]"
-JWT_SECRET=[pon aqui tu palabra secreta de JWT]
-EOF
-fi
-
-
-
+# UF UF UF :O
+# DB CONFIG MUY MUY NECESARIA
+echo "📄 Generando pkg/config/db.go (Conexión a DB)..."
 cat <<EOF > pkg/config/db.go
 package config
 
 import (
-	"database/sql"
-	"fmt"
-	"log"
-	"os"
+  "database/sql"
+  "fmt"
+  "log"
+  "os"
 
-	"github.com/joho/godotenv"
+  "github.com/joho/godotenv" // La mantengo por si se ejecuta SIN Docker
 
-	_ "github.com/lib/pq"
+  _ "github.com/lib/pq"
 )
 
 var db *sql.DB
 
+// ConnectDB establece la conexión a la base de datos.
 func ConnectDB() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
+  // Solo cargamos el .env si no estamos en un entorno Dockerizado o si falta la variable clave.
+  // En Docker Compose, las variables ya son inyectadas por el 'env_file' en docker-compose.yml.
+  if os.Getenv("IN_DOCKER") != "true" {
+      if err := godotenv.Load(); err != nil {
+          log.Println("Advertencia: No se pudo cargar .env. Asumiendo variables de entorno preexistentes.")
+      }
+  }
 
-	dbURL := os.Getenv("DB_URL")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL is not set in .env file")
-	}
+  // Usar la variable DB_URL del .env / entorno
+  dbURL := os.Getenv("DB_URL")
+  if dbURL == "" {
+    // Si falla, significa que la inyección de Docker o el archivo .env fallaron
+    log.Fatal("Error: La variable DB_URL no está configurada en el entorno.")
+  }
+  var err error
 
-	db, err = sql.Open("postgres", dbURL)
-	if err != nil {
-		log.Fatal("Failed to open database connection:", err)
-	}
+  db, err = sql.Open("postgres", dbURL) 
+  if err != nil {
 
-	err = db.Ping()
-	if err != nil {
-		log.Fatal("Failed to ping database:", err)
-	}
+    log.Fatalf("Error al abrir conexión con DB (%s): %v", dbURL, err)
+  }
 
-	fmt.Println("Connected to the database successfully!")
+  if err = db.Ping(); err != nil {
+    log.Fatalf("Error al hacer Ping a la DB. %v", err)
+  }
+
+  fmt.Println("✅ Conectado a la base de datos exitosamente.")
 }
-
+// RETORNA UNA FUNCION QUE DEVUELVE LA CONEXIÓN A LA BASE DE DATOS
 func GetDB() *sql.DB {
-	if db == nil {
-		log.Fatal("Database connection is not established")
-	}
-	return db
+  if db == nil {
+    log.Fatal("Error: La conexión a la base de datos no ha sido establecida.")
+  }
+  return db
 }
-
 EOF
-# main.go muy importante
+
+echo "📄 Generando cmd/server/main.go (Punto de entrada)..."
+# main.go ES EL PUNTO DE ENTRADA DE LA APLICACIÓN
+# AQUI SE CONECTA A LA BASE DE DATOS, SE INICIALIZA FIBER Y SE LEVANTA EL SERVIDOR
+# AQUI PUEDES AGREGAR RUTAS, MIDDLEWARES, ETC
+# POR AHORA SOLO TENGO UNA RUTA DE SALUD BASICA
 cat <<EOF > cmd/server/main.go
 package main
 
 import (
-	"$name/pkg/config"
-	"log"
-	"os"
+  "fmt"
+  "$PROJECT_NAME/pkg/config"
+  "log"
+  "os"
+  
 
-	"github.com/gofiber/fiber/v2"
-	_ "github.com/lib/pq"
+  "github.com/gofiber/fiber/v2"
+  _ "github.com/lib/pq"
 )
 
 func main() {
-	config.ConnectDB()
-	app := fiber.New()
+  config.ConnectDB()
+
+  // CERRAR LA CONEXIÓN A LA DB AL SALIR
+  defer func() {
+    // db.Close() es bloqueante y no acepta contexto, por lo que simplificamos.
+    if err := config.GetDB().Close(); err != nil {
+      log.Printf("Error al cerrar la conexión a DB: %v", err)
+    } else {
+      fmt.Println("Conexión a DB cerrada.")
+    }
+  }()
 
 
+  app := fiber.New()
 
-	log.Fatal(app.Listen(":" + os.Getenv("PORT")))
+  // RUTA DE SALUD
+  app.Get("/", func(c *fiber.Ctx) error {
+    return c.Status(fiber.StatusOK).JSON(fiber.Map{
+      "message": "API de $PROJECT_NAME en línea!",
+      "status":  "ok",
+    })
+  })
+
+  port := os.Getenv("PORT")
+  if port == "" {
+    port = "8080" 
+  }
+  log.Printf("🌍 Servidor escuchando en el puerto: %s", port)
+  log.Fatal(app.Listen(":" + port))
 }
 
 EOF
 
+# ==================================
+# 5. CONFIGURACIÓN DE AIR
+# ==================================
 
-
-echo "Generando configuaracion de Air"
-# Esta condicional verifica si el usuario tiene air instalado, sino lo instala
+echo "🔧 Configurando Air para Hot Reload..."
 if ! command -v air &> /dev/null
 then
     echo "❌ Air no está instalado."
@@ -232,16 +431,23 @@ then
     if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
         echo "🔧 Instalando Air..."
         go install github.com/air-verse/air@latest
-        echo "✅ Air instalado"
+        echo "✅ Air instalado."
     else
-        echo "⚠️ Air no se instalará. Continuando sin hot reload."
+        echo "⚠️ Air no se instalará. Deberás compilar manualmente."
     fi
 else
-    echo "✅ Air ya está instalado"
+    echo "✅ Air ya está instalado."
 fi
 
-
-air init > /dev/null
+# CONFIGURA AIR TOML YA QUE LA CONFIGURACION POR DEFECTO NO SIRVE
+# SI AIR NO ESTA INSTALADO, ESTA PARTE NO HARA NADA
+# EL ARCHIVO .AIR.TOML ESTA CONFIGURADO PARA QUE SOLO RECONOZCA CAMBIOS EN EL BACKEND
+# Y NO EN COSAS COMO EL DOCKERFILE, COMPOSE, ETC
+# ASI NO SE REINICIA EL SERVIDOR INNECESARIAMENTE
+# SI QUIERES MODIFICARLO, PUEDES HACERLO DESPUES DE QUE EL SCRIPT TERMINE
+# OJO: SI MODIFICAS LA ESTRUCTURA DE DIRECTORIOS, DEBES ACTUALIZAR ESTO
+# YA QUE SI NO, AIR NO DETECTARA LOS CAMBIOS
+air init > /dev/null 2>&1
 cat <<EOF > .air.toml
 root = "."
 testdata_dir = "testdata"
@@ -259,7 +465,7 @@ tmp_dir = "tmp"
   exclude_unchanged = false
   follow_symlink = false
   full_bin = ""
-include_dir = ["cmd/server", "internal", "pkg"]
+  include_dir = ["cmd/server", "internal", "pkg"]
   include_ext = ["go", "tpl", "tmpl", "html"]
   include_file = []
   kill_delay = "0s"
@@ -297,14 +503,5 @@ include_dir = ["cmd/server", "internal", "pkg"]
   clear_on_rebuild = false
   keep_scroll = true
 EOF
-
-
-echo "✅ Proyecto '$name' creado exitosamente 🚀"
-
-echo "💡 Ejecuta: cd $name"
-
-echo "go mod tidy"
-
-echo "GRACIAS POR USAR ESTE SCRIPT "
-
-echo "💖 Puedes apoyarme en: https://github.com/Nn3z"
+# ESTE SCRIPT ES DE USO LIBRE, ASI QUE PUEDES MODIFICARLO A TU GUSTO
+# SI TIENES ALGUNA SUGERENCIA, PUEDES CONTACTARME EN github.com/Nn3z o en https://www.linkedin.com/in/pablo-ponce-82ab61379/
